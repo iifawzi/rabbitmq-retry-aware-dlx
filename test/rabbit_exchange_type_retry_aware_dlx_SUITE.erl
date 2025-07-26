@@ -59,69 +59,90 @@ direct_routing_semantics_when_messages_missing_radlx_arguments(Config) ->
 %%  Testing direct routing when radlx headers are not defined in the message
 %%  This is not the intended use of this exchange, but I want to ensure
 %%  that it behaves like a regular direct exchange in that case.
-  ok = routing_test0(Config, t1()),
-  ok = routing_test0(Config, t2()),
-  ok = routing_test0(Config, t3()),
-  ok = routing_test0(Config, t4()),
+  ok = test_direct_routing_semantics(Config, single_queue_single_publish()),
+  ok = test_direct_routing_semantics(Config, multiple_queues_no_match()),
+  ok = test_direct_routing_semantics(Config, multiple_queues_all_match()),
+  ok = test_direct_routing_semantics(Config, single_queue_multiple_publishes()),
 
   passed.
 
-t1() ->
+single_queue_single_publish() ->
   {[<<"a0.b0.c0.d0">>, <<"a1.b1.c1.d1">>],
     [<<"a0.b0.c0.d0">>],
     1}.
 
-t2() ->
+multiple_queues_no_match() ->
   {[<<"a0.b0.c0.d0">>, <<"a0.b0.c0.d1">>, <<"a0.b0.c0.d2">>],
     [<<"a0.b0.c0.d3">>],
     0}.
 
-t3() ->
+multiple_queues_all_match() ->
   {[<<"a0.b0.c0.d0">>, <<"a0.b0.c0.d1">>],
     [<<"a0.b0.c0.d0">>, <<"a0.b0.c0.d1">>],
     2}.
 
-t4() ->
+single_queue_multiple_publishes() ->
   {[<<"a0.b0.c0.d0">>],
     [<<"a0.b0.c0.d0">>, <<"a0.b0.c0.d1">>],
     1}.
 
-routing_test0(Config, {Queues, Publishes, Count}) ->
-  Msg = #amqp_msg{props = #'P_basic'{}, payload = <<>>},
+test_direct_routing_semantics(Config, {Queues, PublishKeys, ExpectedCount}) ->
   Chan = rabbit_ct_client_helpers:open_channel(Config, 0),
+  ExchangeName = <<"testing">>,
+  
+  setup_exchange(Chan, ExchangeName),
+  setup_queues_and_bindings(Chan, ExchangeName, Queues),
+  publish_messages(Chan, ExchangeName, PublishKeys),
+  
+  ActualCount = count_total_messages(Chan, Queues),
+  ExpectedCount = ActualCount,
+  
+  cleanup_resources(Chan, ExchangeName, Queues),
+  rabbit_ct_client_helpers:close_channel(Chan),
+  ok.
+
+setup_exchange(Chan, ExchangeName) ->
   #'exchange.declare_ok'{} =
     amqp_channel:call(Chan,
       #'exchange.declare'{
         type = <<"radlx">>,
-        exchange = <<"testing">>,
+        exchange = ExchangeName,
         auto_delete = true
-      }),
-  [#'queue.declare_ok'{} =
+      }).
+
+setup_queues_and_bindings(Chan, ExchangeName, Queues) ->
+  [declare_and_bind_queue(Chan, ExchangeName, Q) || Q <- Queues].
+
+declare_and_bind_queue(Chan, ExchangeName, QueueName) ->
+  #'queue.declare_ok'{} =
     amqp_channel:call(Chan, #'queue.declare'{
-      queue = Q, exclusive = true}) || Q <- Queues],
-  [#'queue.bind_ok'{} =
-    amqp_channel:call(Chan, #'queue.bind'{queue = Q,
-      exchange = <<"testing">>,
-      routing_key = Q})
-    || Q <- Queues],
+      queue = QueueName, exclusive = true}),
+  #'queue.bind_ok'{} =
+    amqp_channel:call(Chan, #'queue.bind'{queue = QueueName,
+      exchange = ExchangeName,
+      routing_key = QueueName}).
 
+publish_messages(Chan, ExchangeName, PublishKeys) ->
+  Msg = #amqp_msg{props = #'P_basic'{}, payload = <<>>},
   #'tx.select_ok'{} = amqp_channel:call(Chan, #'tx.select'{}),
-  [amqp_channel:call(Chan, #'basic.publish'{
-    exchange = <<"testing">>, routing_key = RK},
-    Msg) || RK <- Publishes],
-  amqp_channel:call(Chan, #'tx.commit'{}),
+  [publish_single_message(Chan, ExchangeName, RK, Msg) || RK <- PublishKeys],
+  amqp_channel:call(Chan, #'tx.commit'{}).
 
-  Counts =
-    [begin
-       #'queue.declare_ok'{message_count = M} =
-         amqp_channel:call(Chan, #'queue.declare'{queue = Q,
-           exclusive = true}),
-       M
-     end || Q <- Queues],
-  Count = lists:sum(Counts),
-  amqp_channel:call(Chan, #'exchange.delete'{exchange = <<"testing">>}),
-  [amqp_channel:call(Chan, #'queue.delete'{queue = Q}) || Q <- Queues],
+publish_single_message(Chan, ExchangeName, RoutingKey, Msg) ->
+  amqp_channel:call(Chan, #'basic.publish'{
+    exchange = ExchangeName, routing_key = RoutingKey},
+    Msg).
 
-  rabbit_ct_client_helpers:close_channel(Chan),
+count_total_messages(Chan, Queues) ->
+  Counts = [get_queue_message_count(Chan, Q) || Q <- Queues],
+  lists:sum(Counts).
 
-  ok.
+get_queue_message_count(Chan, QueueName) ->
+  #'queue.declare_ok'{message_count = Count} =
+    amqp_channel:call(Chan, #'queue.declare'{queue = QueueName,
+      exclusive = true}),
+  Count.
+
+cleanup_resources(Chan, ExchangeName, Queues) ->
+  amqp_channel:call(Chan, #'exchange.delete'{exchange = ExchangeName}),
+  [amqp_channel:call(Chan, #'queue.delete'{queue = Q}) || Q <- Queues].

@@ -23,7 +23,6 @@
 -define(QueueToTrackArgument, <<"radlx-track-queue">>).
 -define(ReasonToTrackArgument, <<"radlx-track-reason">>).
 -define(DeathArgumentKey, <<"radlx.dead.from">>).
-
 %%----------------------------------------------------------------------------
 info(_X) -> [].
 info(_X, _) -> [].
@@ -38,49 +37,59 @@ route(#exchange{name = Name}, Msg) ->
 
 route(#exchange{name = Name}, Msg, _Opts) ->
   Headers = mc:routing_headers(Msg, [x_headers]),
+  {MaxPerRound, QueueToTrack, ReasonToTrack} = extract_radlx_headers(Headers),
+  Deaths = mc:get_annotation(deaths, Msg),
+  DeathHeader = build_death_header(MaxPerRound, QueueToTrack, ReasonToTrack, Deaths),
+  route_with_death_header(DeathHeader, Name, Msg, Headers).
+
+
+extract_radlx_headers(Headers) ->
   MaxPerRound = maps:get(?MaxPerCycleArgument, Headers, undefined),
   QueueToTrack = maps:get(?QueueToTrackArgument, Headers, undefined),
-  ReasonToTrack =
-    case maps:get(?ReasonToTrackArgument, Headers, <<"rejected">>) of
-      <<"expired">> -> expired;
-      <<"rejected">> -> rejected;
-      <<"maxlen">> -> maxlen;
-      <<"delivery_limit">> -> delivery_limit;
-      _ -> rejected
-    end,
+  ReasonToTrack = parse_reason_to_track(Headers),
+  {MaxPerRound, QueueToTrack, ReasonToTrack}.
 
-  Deaths = mc:get_annotation(deaths, Msg),
-  DeathHeader = getDeadLetterHeader(MaxPerRound, QueueToTrack, ReasonToTrack, Deaths),
-  getMatchings(DeathHeader, Name, Msg, Headers).
+parse_reason_to_track(Headers) ->
+  case maps:get(?ReasonToTrackArgument, Headers, <<"rejected">>) of
+    <<"expired">> -> expired;
+    <<"rejected">> -> rejected;
+    <<"maxlen">> -> maxlen;
+    <<"delivery_limit">> -> delivery_limit;
+    _ -> rejected
+  end.
 
-
-getMatchings(DeathHeader, Name, Msg, Headers) when map_size(DeathHeader) =/= 0 ->
+route_with_death_header(DeathHeader, Name, Msg, Headers) when map_size(DeathHeader) =/= 0 ->
   MergedHeaders = maps:merge(Headers, DeathHeader),
-  HeaderMatches = rabbit_router:match_bindings(
-    Name, fun(#binding{args = Args, key = RoutingKey}) ->
-      case RoutingKey of
-        <<"">> ->  %% Empty routing key means it's a header-only binding
-          XMatchValue = rabbit_misc:table_lookup(Args, <<"x-match">>),
-          Result = case XMatchValue of
-                     {longstr, <<"any">>} ->
-                       match_any(Args, MergedHeaders, fun match/2);
-                     {longstr, <<"any-with-x">>} ->
-                       match_any(Args, MergedHeaders, fun match_x/2);
-                     {longstr, <<"all-with-x">>} ->
-                       match_all(Args, MergedHeaders, fun match_x/2);
-                     _ ->
-                       match_all(Args, MergedHeaders, fun match/2)
-                   end,
-          Result;
-        _ ->
-          false
-      end
-          end),
+  HeaderMatches = match_header_bindings(Name, MergedHeaders),
   case HeaderMatches of
-    [] -> getMatchings(#{}, Name, Msg, []);
+    [] -> direct_semantics(Name, Msg);
     _ -> HeaderMatches
   end;
-getMatchings(_, Name, Msg, _) ->
+route_with_death_header(_, Name, Msg, _) ->
+  direct_semantics(Name, Msg).
+
+match_header_bindings(Name, MergedHeaders) ->
+  rabbit_router:match_bindings(
+    Name, fun(#binding{args = Args, key = RoutingKey}) ->
+      is_header_binding_match(RoutingKey, Args, MergedHeaders)
+    end).
+
+is_header_binding_match(<<"">>, Args, MergedHeaders) ->
+  XMatchValue = rabbit_misc:table_lookup(Args, <<"x-match">>),
+  apply_match_strategy(XMatchValue, Args, MergedHeaders);
+is_header_binding_match(_, _, _) ->
+  false.
+
+apply_match_strategy({longstr, <<"any">>}, Args, Headers) ->
+  match_any(Args, Headers, fun match/2);
+apply_match_strategy({longstr, <<"any-with-x">>}, Args, Headers) ->
+  match_any(Args, Headers, fun match_x/2);
+apply_match_strategy({longstr, <<"all-with-x">>}, Args, Headers) ->
+  match_all(Args, Headers, fun match_x/2);
+apply_match_strategy(_, Args, Headers) ->
+  match_all(Args, Headers, fun match/2).
+
+direct_semantics(Name, Msg) ->
   MsgRoutes = mc:routing_keys(Msg),
   rabbit_db_binding:match_routing_key(Name, MsgRoutes, false).
 
@@ -146,25 +155,32 @@ assert_args_equivalence(X, Args) ->
   rabbit_exchange:assert_args_equivalence(X, Args).
 
 
-getDeadLetterHeader(MaxPerRound, QueueToTrack, ReasonToTrack, Deaths) when is_integer(MaxPerRound),
-  MaxPerRound =/= 0,
-  QueueToTrack =/= undefined ->
-  case has_death_record(MaxPerRound, QueueToTrack, ReasonToTrack, Deaths) of
-    true ->
-      #{?DeathArgumentKey => QueueToTrack};
-    false ->
-      #{}
-  end;
-getDeadLetterHeader(_, _, _, _) ->
-  #{}.
+build_death_header(MaxPerRound, QueueToTrack, ReasonToTrack, Deaths) ->
+  case should_add_death_header(MaxPerRound, QueueToTrack, ReasonToTrack, Deaths) of
+    true -> #{?DeathArgumentKey => QueueToTrack};
+    false -> #{}
+  end.
 
-has_death_record(MaxPerRound, RejectQueueName, ReasonToTrack, Deaths) when is_list(Deaths) ->
-  Key = {RejectQueueName, ReasonToTrack},
-  case lists:keyfind(Key, 1, Deaths) of
-    {_, {death, _, _, Count, _}} when Count rem MaxPerRound =:= 0 ->
-      true;
-    _ ->
-      false
-  end;
-has_death_record(_, _, _, _) ->
+should_add_death_header(MaxPerRound, QueueToTrack, ReasonToTrack, Deaths) 
+  when is_integer(MaxPerRound), MaxPerRound =/= 0, QueueToTrack =/= undefined ->
+  check_death_count_reached_threshold(MaxPerRound, QueueToTrack, ReasonToTrack, Deaths);
+should_add_death_header(_, _, _, _) ->
   false.
+
+check_death_count_reached_threshold(MaxPerRound, QueueName, Reason, Deaths) when is_list(Deaths) ->
+  DeathKey = {QueueName, Reason},
+  case find_death_record(DeathKey, Deaths) of
+    {death, _, _, Count, _} -> is_threshold_reached(Count, MaxPerRound);
+    not_found -> false
+  end;
+check_death_count_reached_threshold(_, _, _, _) ->
+  false.
+
+find_death_record(Key, Deaths) ->
+  case lists:keyfind(Key, 1, Deaths) of
+    {_, DeathRecord} -> DeathRecord;
+    false -> not_found
+  end.
+
+is_threshold_reached(Count, MaxPerRound) ->
+  Count rem MaxPerRound =:= 0.
