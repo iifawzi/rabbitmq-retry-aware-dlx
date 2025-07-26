@@ -39,8 +39,8 @@ route(#exchange{name = Name}, Msg, _Opts) ->
   Headers = mc:routing_headers(Msg, [x_headers]),
   {MaxPerRound, QueueToTrack, ReasonToTrack} = extract_radlx_headers(Headers),
   Deaths = mc:get_annotation(deaths, Msg),
-  DeathHeader = build_death_header(MaxPerRound, QueueToTrack, ReasonToTrack, Deaths),
-  route_with_death_header(DeathHeader, Name, Msg, Headers).
+  RadlxDeathDecision = build_death_decision_header(MaxPerRound, QueueToTrack, ReasonToTrack, Deaths),
+  route_with_death_header(RadlxDeathDecision, Name, Msg, Headers).
 
 
 extract_radlx_headers(Headers) ->
@@ -58,8 +58,8 @@ parse_reason_to_track(Headers) ->
     _ -> rejected
   end.
 
-route_with_death_header(DeathHeader, Name, Msg, Headers) when map_size(DeathHeader) =/= 0 ->
-  MergedHeaders = maps:merge(Headers, DeathHeader),
+route_with_death_header(DeathDecision, Name, Msg, Headers) when map_size(DeathDecision) =/= 0 ->
+  MergedHeaders = maps:merge(Headers, DeathDecision),
   HeaderMatches = match_header_bindings(Name, MergedHeaders),
   case HeaderMatches of
     [] -> direct_semantics(Name, Msg);
@@ -155,7 +155,7 @@ assert_args_equivalence(X, Args) ->
   rabbit_exchange:assert_args_equivalence(X, Args).
 
 
-build_death_header(MaxPerRound, QueueToTrack, ReasonToTrack, Deaths) ->
+build_death_decision_header(MaxPerRound, QueueToTrack, ReasonToTrack, Deaths) ->
   case should_add_death_header(MaxPerRound, QueueToTrack, ReasonToTrack, Deaths) of
     true -> #{?DeathArgumentKey => QueueToTrack};
     false -> #{}
