@@ -172,7 +172,7 @@ validate_binding(_X, #binding{args = Args}) ->
       {error, {binding_invalid,
         "Invalid x-match field type ~tp (value ~tp); "
         "expected longstr", [Type, Other]}};
-    undefined -> ok %% [0]
+    undefined -> ok
   end.
 
 delete(_Serial, #exchange{name = X}) ->
