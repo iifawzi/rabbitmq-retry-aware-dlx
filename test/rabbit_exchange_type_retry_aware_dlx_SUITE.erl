@@ -16,8 +16,8 @@ all() ->
 groups() ->
   [
     {non_parallel_tests, [], [
-      direct_routing_semantics_when_messages_missing_radlx_arguments,
-      direct_routing_semantics_when_messages_with_radlx_arguments_but_should_not_die_yet,
+      topic_routing_semantics_when_messages_missing_radlx_arguments,
+      topic_routing_semantics_when_messages_with_radlx_arguments_but_should_not_die_yet,
       testing_topology_two_retries_for_one_cycle_reject_reason,
       testing_topology_two_retries_for_two_cycles_reject_reason,
       testing_topology_expired_reason
@@ -59,25 +59,25 @@ end_per_testcase(Testcase, Config) ->
 %% Testcases.
 %% -------------------------------------------------------------------
 
-direct_routing_semantics_when_messages_missing_radlx_arguments(Config) ->
-%%  Testing direct routing when radlx headers are not defined in the message
+topic_routing_semantics_when_messages_missing_radlx_arguments(Config) ->
+%%  Testing topic routing when radlx headers are not defined in the message
 %%  This is not the intended use of this exchange, but I want to ensure
-%%  that it behaves like a regular direct exchange in that case.
-  ok = test_direct_routing_semantics(Config, single_queue_single_publish()),
-  ok = test_direct_routing_semantics(Config, multiple_queues_no_match()),
-  ok = test_direct_routing_semantics(Config, multiple_queues_all_match()),
-  ok = test_direct_routing_semantics(Config, single_queue_multiple_publishes()),
+%%  that it behaves like a regular topic exchange in that case.
+  ok = test_topic_routing_semantics(Config, single_queue_single_publish()),
+  ok = test_topic_routing_semantics(Config, multiple_queues_no_match()),
+  ok = test_topic_routing_semantics(Config, multiple_queues_all_match()),
+  ok = test_topic_routing_semantics(Config, single_queue_multiple_publishes()),
 
   passed.
 
-direct_routing_semantics_when_messages_with_radlx_arguments_but_should_not_die_yet(Config) ->
-%%    Testing direct routing when radlx headers defined in the message
+topic_routing_semantics_when_messages_with_radlx_arguments_but_should_not_die_yet(Config) ->
+%%    Testing topic routing when radlx headers defined in the message
 %%    but the message should not die yet, as the death condition is not met.
 %%    so the expectations here are the same of the previous test.
-  ok = test_direct_routing_semantics_given_radlx(Config, single_queue_single_publish()),
-  ok = test_direct_routing_semantics_given_radlx(Config, multiple_queues_no_match()),
-  ok = test_direct_routing_semantics_given_radlx(Config, multiple_queues_all_match()),
-  ok = test_direct_routing_semantics_given_radlx(Config, single_queue_multiple_publishes()),
+  ok = test_topic_routing_semantics_given_radlx(Config, single_queue_single_publish()),
+  ok = test_topic_routing_semantics_given_radlx(Config, multiple_queues_no_match()),
+  ok = test_topic_routing_semantics_given_radlx(Config, multiple_queues_all_match()),
+  ok = test_topic_routing_semantics_given_radlx(Config, single_queue_multiple_publishes()),
   passed.
 
 testing_topology_two_retries_for_one_cycle_reject_reason(Config) ->
@@ -131,7 +131,7 @@ testing_topology_two_retries_for_one_cycle_reject_reason(Config) ->
 testing_topology_two_retries_for_two_cycles_reject_reason(Config) ->
   %% Testing a topology where the message should be processed by the queue two times, and rejected twice,
   %% and then moves to the final dead letter queue that has TTL so messages will be routed back to the router exchange
-  %% which will direct it to the original queue and should be processed again for the same two times again and rejected,
+  %% which will route it to the original queue and should be processed again for the same two times again and rejected,
   %% before moving again to the final dead letter queue.
   %% This test i'm validating the rem technique used to ensure same number of retries across cycles.
   {_, Chan} = rabbit_ct_client_helpers:open_connection_and_channel(Config, 0),
@@ -274,10 +274,10 @@ single_queue_multiple_publishes() ->
 %% Helpers.
 %% -------------------------------------------------------------------
 
-test_direct_routing_semantics(Config, TestSpec) ->
+test_topic_routing_semantics(Config, TestSpec) ->
   test_routing_with_headers(Config, TestSpec, []).
 
-test_direct_routing_semantics_given_radlx(Config, TestSpec) ->
+test_topic_routing_semantics_given_radlx(Config, TestSpec) ->
   test_routing_with_headers(Config, TestSpec, [
     {<<"radlx-max-per-cycle">>, long, 1000},
     {<<"radlx-track-queue">>, longstr, <<"queue">>}

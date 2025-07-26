@@ -35,12 +35,12 @@ serialise_events() -> false.
 route(#exchange{name = Name}, Msg) ->
   route(#exchange{name = Name}, Msg, #{}).
 
-route(#exchange{name = Name}, Msg, _Opts) ->
+route(#exchange{name = Name}, Msg, Opts) ->
   Headers = mc:routing_headers(Msg, [x_headers]),
   {MaxPerRound, QueueToTrack, ReasonToTrack} = extract_radlx_headers(Headers),
   Deaths = mc:get_annotation(deaths, Msg),
   RadlxDeathDecision = build_death_decision_header(MaxPerRound, QueueToTrack, ReasonToTrack, Deaths),
-  route_with_death_header(RadlxDeathDecision, Name, Msg, Headers).
+  route_with_death_header(RadlxDeathDecision, Name, Msg, Headers, Opts).
 
 
 extract_radlx_headers(Headers) ->
@@ -58,15 +58,15 @@ parse_reason_to_track(Headers) ->
     _ -> rejected
   end.
 
-route_with_death_header(DeathDecision, Name, Msg, Headers) when map_size(DeathDecision) =/= 0 ->
+route_with_death_header(DeathDecision, Name, Msg, Headers, Opts) when map_size(DeathDecision) =/= 0 ->
   MergedHeaders = maps:merge(Headers, DeathDecision),
   HeaderMatches = match_header_bindings(Name, MergedHeaders),
   case HeaderMatches of
-    [] -> direct_semantics(Name, Msg);
+    [] -> topic_semantics(Name, Msg, Opts);
     _ -> HeaderMatches
   end;
-route_with_death_header(_, Name, Msg, _) ->
-  direct_semantics(Name, Msg).
+route_with_death_header(_, Name, Msg, _, Opts) ->
+  topic_semantics(Name, Msg, Opts).
 
 match_header_bindings(Name, MergedHeaders) ->
   rabbit_router:match_bindings(
@@ -74,7 +74,7 @@ match_header_bindings(Name, MergedHeaders) ->
       is_header_binding_match(RoutingKey, Args, MergedHeaders)
     end).
 
-is_header_binding_match(<<"">>, Args, MergedHeaders) ->
+is_header_binding_match(<<>>, Args, MergedHeaders) ->
   XMatchValue = rabbit_misc:table_lookup(Args, <<"x-match">>),
   apply_match_strategy(XMatchValue, Args, MergedHeaders);
 is_header_binding_match(_, _, _) ->
@@ -89,9 +89,39 @@ apply_match_strategy({longstr, <<"all-with-x">>}, Args, Headers) ->
 apply_match_strategy(_, Args, Headers) ->
   match_all(Args, Headers, fun match/2).
 
-direct_semantics(Name, Msg) ->
-  MsgRoutes = mc:routing_keys(Msg),
-  rabbit_db_binding:match_routing_key(Name, MsgRoutes, false).
+topic_semantics(Name, Msg, Opts) ->
+  RKeys = mc:routing_keys(Msg),
+  lists:append([rabbit_db_topic_exchange:match(Name, RKey, Opts) || RKey <- RKeys]).
+
+build_death_decision_header(MaxPerRound, QueueToTrack, ReasonToTrack, Deaths) ->
+  case should_add_death_header(MaxPerRound, QueueToTrack, ReasonToTrack, Deaths) of
+    true -> #{?DeathArgumentKey => QueueToTrack};
+    false -> #{}
+  end.
+
+should_add_death_header(MaxPerRound, QueueToTrack, ReasonToTrack, Deaths) 
+  when is_integer(MaxPerRound), MaxPerRound =/= 0, QueueToTrack =/= undefined ->
+  check_death_count_reached_threshold(MaxPerRound, QueueToTrack, ReasonToTrack, Deaths);
+should_add_death_header(_, _, _, _) ->
+  false.
+
+check_death_count_reached_threshold(MaxPerRound, QueueName, Reason, Deaths) when is_list(Deaths) ->
+  DeathKey = {QueueName, Reason},
+  case find_death_record(DeathKey, Deaths) of
+    {death, _, _, Count, _} -> is_threshold_reached(Count, MaxPerRound);
+    not_found -> false
+  end;
+check_death_count_reached_threshold(_, _, _, _) ->
+  false.
+
+find_death_record(Key, Deaths) ->
+  case lists:keyfind(Key, 1, Deaths) of
+    {_, DeathRecord} -> DeathRecord;
+    false -> not_found
+  end.
+
+is_threshold_reached(Count, MaxPerRound) ->
+  Count rem MaxPerRound =:= 0.
 
 match_x({<<"x-match">>, _, _}, _M) ->
   skip;
@@ -145,42 +175,23 @@ validate_binding(_X, #binding{args = Args}) ->
     undefined -> ok %% [0]
   end.
 
-validate(_X) -> ok.
-create(_Serial, _X) -> ok.
-delete(_Serial, _X) -> ok.
-policy_changed(_X1, _X2) -> ok.
-add_binding(_Serial, _X, _B) -> ok.
-remove_bindings(_Serial, _X, _Bs) -> ok.
+delete(_Serial, #exchange{name = X}) ->
+  rabbit_db_topic_exchange:delete_all_for_exchange(X).
+
+add_binding(_Serial, _Exchange, Binding = #binding{key = RoutingKey}) ->
+  case RoutingKey of
+    <<>> -> ok;
+    _    -> rabbit_db_topic_exchange:set(Binding)
+  end.
+
+remove_bindings(_Serial, _X, Binding = #binding{key = RoutingKey}) ->
+  case RoutingKey of
+    <<>> -> ok;
+    _    -> rabbit_db_topic_exchange:delete(Binding)
+  end.
 assert_args_equivalence(X, Args) ->
   rabbit_exchange:assert_args_equivalence(X, Args).
 
-
-build_death_decision_header(MaxPerRound, QueueToTrack, ReasonToTrack, Deaths) ->
-  case should_add_death_header(MaxPerRound, QueueToTrack, ReasonToTrack, Deaths) of
-    true -> #{?DeathArgumentKey => QueueToTrack};
-    false -> #{}
-  end.
-
-should_add_death_header(MaxPerRound, QueueToTrack, ReasonToTrack, Deaths) 
-  when is_integer(MaxPerRound), MaxPerRound =/= 0, QueueToTrack =/= undefined ->
-  check_death_count_reached_threshold(MaxPerRound, QueueToTrack, ReasonToTrack, Deaths);
-should_add_death_header(_, _, _, _) ->
-  false.
-
-check_death_count_reached_threshold(MaxPerRound, QueueName, Reason, Deaths) when is_list(Deaths) ->
-  DeathKey = {QueueName, Reason},
-  case find_death_record(DeathKey, Deaths) of
-    {death, _, _, Count, _} -> is_threshold_reached(Count, MaxPerRound);
-    not_found -> false
-  end;
-check_death_count_reached_threshold(_, _, _, _) ->
-  false.
-
-find_death_record(Key, Deaths) ->
-  case lists:keyfind(Key, 1, Deaths) of
-    {_, DeathRecord} -> DeathRecord;
-    false -> not_found
-  end.
-
-is_threshold_reached(Count, MaxPerRound) ->
-  Count rem MaxPerRound =:= 0.
+validate(_X) -> ok.
+create(_Serial, _X) -> ok.
+policy_changed(_X1, _X2) -> ok.
