@@ -37,12 +37,11 @@ route(#exchange{name = Name}, Msg) ->
   route(#exchange{name = Name}, Msg, #{}).
 
 route(#exchange{name = Name}, Msg, _Opts) ->
-  %% TODO: find a way not to extract x-headers unless necessary
   Headers = mc:routing_headers(Msg, [x_headers]),
   MaxPerRound = maps:get(?MaxPerCycleArgument, Headers, undefined),
   QueueToTrack = maps:get(?QueueToTrackArgument, Headers, undefined),
   ReasonToTrack =
-    case maps:get(?ReasonToTrackArgument, Headers) of
+    case maps:get(?ReasonToTrackArgument, Headers, <<"rejected">>) of
       <<"expired">> -> expired;
       <<"rejected">> -> rejected;
       <<"maxlen">> -> maxlen;
@@ -78,12 +77,8 @@ getMatchings(DeathHeader, Name, Msg, Headers) when map_size(DeathHeader) =/= 0 -
       end
           end),
   case HeaderMatches of
-    [] ->
-      Routes = mc:routing_keys(Msg),
-      DirectMatches = rabbit_db_binding:match_routing_key(Name, Routes, false),
-      DirectMatches;
-    _ ->
-      HeaderMatches
+    [] -> getMatchings(#{}, Name, Msg, []);
+    _ -> HeaderMatches
   end;
 getMatchings(_, Name, Msg, _) ->
   MsgRoutes = mc:routing_keys(Msg),
@@ -171,5 +166,5 @@ has_death_record(MaxPerRound, RejectQueueName, ReasonToTrack, Deaths) when is_li
     _ ->
       false
   end;
-has_death_record(_, _,_, _) ->
+has_death_record(_, _, _, _) ->
   false.
