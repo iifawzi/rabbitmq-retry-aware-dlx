@@ -19,7 +19,8 @@ groups() ->
       direct_routing_semantics_when_messages_missing_radlx_arguments,
       direct_routing_semantics_when_messages_with_radlx_arguments_but_should_not_die_yet,
       testing_topology_two_retries_for_one_cycle_reject_reason,
-      testing_topology_two_retries_for_two_cycles_reject_reason
+      testing_topology_two_retries_for_two_cycles_reject_reason,
+      testing_topology_expired_reason
     ]}
   ].
 
@@ -183,6 +184,64 @@ testing_topology_two_retries_for_two_cycles_reject_reason(Config) ->
   [DTag4] = consume(Chan, QueueName, [Payload]),
   amqp_channel:cast(Chan, #'basic.reject'{delivery_tag = DTag4, requeue = false}),
   wait_for_messages(Config, [[FinalDeadLetterQueue, <<"1">>, <<"1">>, <<"0">>]]),
+
+  cleanup_resources(Chan, [DLXExchange], [QueueName, FinalDeadLetterQueue]),
+  passed.
+
+testing_topology_expired_reason(Config) ->
+  %% Testing a topology where the message should be processed by the queue two times, once rejected
+  %% should go to delayed queue that will have a TTL of 5 seconds, then when expires go to the router exchange
+  %% that will route it to the original queue, once rejected again it should go to the final dead letter queue
+  {_, Chan} = rabbit_ct_client_helpers:open_connection_and_channel(Config, 0),
+  RouterExchange = <<"router">>,
+  DLXExchange = <<"dlx">>,
+  QueueName = <<"queue">>,
+  DelayedQueueName = <<"delayed_queue">>,
+  FinalDeadLetterQueue = <<"failed_queue">>,
+
+  declare_exchange(Chan, RouterExchange, <<"direct">>),
+  declare_exchange(Chan, DLXExchange, <<"radlx">>),
+
+  declare_queue_with_dlx(Chan, QueueName, DLXExchange),
+  declare_queue(Chan, FinalDeadLetterQueue),
+  declare_queue_with_dlx_and_ttl(Chan, DelayedQueueName, RouterExchange, 5000),
+
+  bind_queue_with_routing_key(Chan, QueueName, RouterExchange, QueueName),
+  bind_queue_with_routing_key(Chan, DelayedQueueName, DLXExchange, QueueName),
+  bind_queue_with_arguments(Chan, FinalDeadLetterQueue, DLXExchange, [
+    {<<"x-match">>, longstr, <<"all">>},
+    {<<"radlx.dead.source">>, longstr, DelayedQueueName}
+  ]),
+
+  Payload = <<"p">>,
+  publish_message_with_headers(Chan, QueueName, Payload, [
+    {<<"radlx-max-per-cycle">>, long, 2},
+    {<<"radlx-track-queue">>, longstr, DelayedQueueName},
+    {<<"radlx-track-reason">>, longstr, <<"expired">>}
+  ]),
+
+
+  wait_for_messages(Config, [[QueueName, <<"1">>, <<"1">>, <<"0">>]]),
+
+  [DTag1] = consume(Chan, QueueName, [Payload]),
+  %% after this rejection, message will go to radlx which will decide not to die given didn't expire twice yet, will be routed to the delayed queue
+  amqp_channel:cast(Chan, #'basic.reject'{delivery_tag = DTag1, requeue = false}),
+
+  wait_for_messages(Config, [[FinalDeadLetterQueue, <<"0">>, <<"0">>, <<"0">>]]),
+  wait_for_messages(Config, [[DelayedQueueName, <<"1">>, <<"1">>, <<"0">>]]),
+  wait_for_messages(Config, [[QueueName, <<"1">>, <<"1">>, <<"0">>]]),
+  [DTag2] = consume(Chan, QueueName, [Payload]),
+  amqp_channel:cast(Chan, #'basic.reject'{delivery_tag = DTag2, requeue = false}),
+
+  wait_for_messages(Config, [[FinalDeadLetterQueue, <<"0">>, <<"0">>, <<"0">>]]),
+  wait_for_messages(Config, [[DelayedQueueName, <<"1">>, <<"1">>, <<"0">>]]),
+  wait_for_messages(Config, [[QueueName, <<"1">>, <<"1">>, <<"0">>]]),
+  [DTag3] = consume(Chan, QueueName, [Payload]),
+  amqp_channel:cast(Chan, #'basic.reject'{delivery_tag = DTag3, requeue = false}),
+
+  wait_for_messages(Config, [[FinalDeadLetterQueue, <<"1">>, <<"1">>, <<"0">>]]),
+  wait_for_messages(Config, [[QueueName, <<"0">>, <<"0">>, <<"0">>]]),
+  wait_for_messages(Config, [[DelayedQueueName, <<"0">>, <<"0">>, <<"0">>]]),
 
   cleanup_resources(Chan, [DLXExchange], [QueueName, FinalDeadLetterQueue]),
   passed.
