@@ -18,10 +18,11 @@ groups() ->
     {non_parallel_tests, [], [
       topic_routing_semantics_when_messages_missing_radlx_arguments,
       topic_routing_semantics_when_messages_with_radlx_arguments_but_should_not_die_yet,
+      testing_invalid_reason_defaults_to_rejected,
       testing_topology_two_retries_for_one_cycle_reject_reason,
       testing_topology_two_retries_for_two_cycles_reject_reason,
       testing_topology_expired_reason,
-      testing_invalid_reason_defaults_to_rejected,
+      testing_topology_match_with_multiple_failed_queue_based_on_headers
     ]}
   ].
 
@@ -80,6 +81,38 @@ topic_routing_semantics_when_messages_with_radlx_arguments_but_should_not_die_ye
   ok = test_topic_routing_semantics_given_radlx(Config, multiple_queues_all_match()),
   ok = test_topic_routing_semantics_given_radlx(Config, single_queue_multiple_publishes()),
   passed.
+
+  testing_invalid_reason_defaults_to_rejected(Config) ->
+    {_, Chan} = rabbit_ct_client_helpers:open_connection_and_channel(Config, 0),
+    DLXExchange = <<"dlx">>,
+    QueueName = <<"queue">>,
+    FinalDeadLetterQueue = <<"failed_queue">>,
+  
+    declare_exchange(Chan, DLXExchange, <<"radlx">>),
+    declare_queue_with_dlx(Chan, QueueName, DLXExchange),
+    declare_queue(Chan, FinalDeadLetterQueue),
+    bind_queue_with_routing_key(Chan, QueueName, DLXExchange, QueueName),
+    bind_queue_with_arguments(Chan, FinalDeadLetterQueue, DLXExchange, [
+      {<<"x-match">>, longstr, <<"all">>},
+      {<<"radlx.dead.source">>, longstr, QueueName}
+    ]),
+  
+    Payload = <<"p">>,
+    %% Invalid reason should default to "rejected"
+    publish_message_with_headers(Chan, QueueName, Payload, [
+      {<<"radlx-max-per-cycle">>, long, 1},
+      {<<"radlx-track-queue">>, longstr, QueueName},
+      {<<"radlx-track-reason">>, longstr, <<"invalid_reason">>}
+    ]),
+  
+    wait_for_messages(Config, [[QueueName, <<"1">>, <<"1">>, <<"0">>]]),
+    [DTag] = consume(Chan, QueueName, [Payload]),
+    amqp_channel:cast(Chan, #'basic.reject'{delivery_tag = DTag, requeue = false}),
+  
+    wait_for_messages(Config, [[FinalDeadLetterQueue, <<"1">>, <<"1">>, <<"0">>]]),
+    
+    cleanup_resources(Chan, [DLXExchange], [QueueName, FinalDeadLetterQueue]),
+    passed.
 
 testing_topology_two_retries_for_one_cycle_reject_reason(Config) ->
   %% Testing a topology where the message should be processed by the queue two times,
@@ -247,38 +280,67 @@ testing_topology_expired_reason(Config) ->
   cleanup_resources(Chan, [DLXExchange], [QueueName, FinalDeadLetterQueue]),
   passed.
 
-
-testing_invalid_reason_defaults_to_rejected(Config) ->
-  {_, Chan} = rabbit_ct_client_helpers:open_connection_and_channel(Config, 0),
-  DLXExchange = <<"dlx">>,
-  QueueName = <<"queue">>,
-  FinalDeadLetterQueue = <<"failed_queue">>,
-
-  declare_exchange(Chan, DLXExchange, <<"radlx">>),
-  declare_queue_with_dlx(Chan, QueueName, DLXExchange),
-  declare_queue(Chan, FinalDeadLetterQueue),
-  bind_queue_with_routing_key(Chan, QueueName, DLXExchange, QueueName),
-  bind_queue_with_arguments(Chan, FinalDeadLetterQueue, DLXExchange, [
-    {<<"x-match">>, longstr, <<"all">>},
-    {<<"radlx.dead.source">>, longstr, QueueName}
-  ]),
-
-  Payload = <<"p">>,
-  %% Invalid reason should default to "rejected"
-  publish_message_with_headers(Chan, QueueName, Payload, [
-    {<<"radlx-max-per-cycle">>, long, 1},
-    {<<"radlx-track-queue">>, longstr, QueueName},
-    {<<"radlx-track-reason">>, longstr, <<"invalid_reason">>}
-  ]),
-
-  wait_for_messages(Config, [[QueueName, <<"1">>, <<"1">>, <<"0">>]]),
-  [DTag] = consume(Chan, QueueName, [Payload]),
-  amqp_channel:cast(Chan, #'basic.reject'{delivery_tag = DTag, requeue = false}),
-
-  wait_for_messages(Config, [[FinalDeadLetterQueue, <<"1">>, <<"1">>, <<"0">>]]),
+  testing_topology_match_with_multiple_failed_queue_based_on_headers(Config) ->
+    %% The goal of this test is to ensure that when the message should die
+    %% it can be routed to more than DLQ based on headers. 
+    {_, Chan} = rabbit_ct_client_helpers:open_connection_and_channel(Config, 0),
+    DLXExchange = <<"dlx">>,
+    QueueName = <<"queue">>,
+    DLQHighPriority = <<"glq_high_priority">>,
+    DLQLogger = <<"logger">>,
+    DLQAllWithX = <<"dlq_all_with_x">>,
+    DLQAnyWithX = <<"dlq_any_with_x">>,
   
-  cleanup_resources(Chan, [DLXExchange], [QueueName, FinalDeadLetterQueue]),
-  passed.
+    declare_exchange(Chan, DLXExchange, <<"radlx">>),
+    declare_queue_with_dlx(Chan, QueueName, DLXExchange),
+    declare_queue(Chan, DLQHighPriority),
+    declare_queue(Chan, DLQLogger),
+    declare_queue(Chan, DLQAllWithX),
+    declare_queue(Chan, DLQAnyWithX),
+  
+    bind_queue_with_arguments(Chan, DLQHighPriority, DLXExchange, [
+      {<<"x-match">>, longstr, <<"all">>},
+      {<<"radlx.dead.source">>, longstr, QueueName},
+      {<<"priority">>, longstr, <<"high">>}
+    ]),
+  
+    bind_queue_with_arguments(Chan, DLQLogger, DLXExchange, [
+      {<<"x-match">>, longstr, <<"any">>},
+      {<<"priority">>, longstr, <<"high">>},
+      {<<"priority">>, longstr, <<"low">>}
+    ]),
+  
+    bind_queue_with_arguments(Chan, DLQAllWithX, DLXExchange, [
+      {<<"x-match">>, longstr, <<"all-with-x">>},
+      {<<"radlx.dead.source">>, longstr, QueueName},
+      {<<"x-first-death-queue">>, longstr, QueueName}
+    ]),
+  
+    bind_queue_with_arguments(Chan, DLQAnyWithX, DLXExchange, [
+      {<<"x-match">>, longstr, <<"any-with-x">>},
+      {<<"radlx.dead.source">>, longstr, <<"wrong_queue">>}
+    ]),
+  
+    bind_queue_with_routing_key(Chan, QueueName, DLXExchange, QueueName),
+  
+    Payload = <<"p">>,
+    publish_message_with_headers(Chan, QueueName, Payload, [
+      {<<"radlx-max-per-cycle">>, long, 1},
+      {<<"radlx-track-queue">>, longstr, QueueName},
+      {<<"priority">>, longstr, <<"high">>}
+    ]),
+  
+    wait_for_messages(Config, [[QueueName, <<"1">>, <<"1">>, <<"0">>]]),
+    [DTag] = consume(Chan, QueueName, [Payload]),
+    amqp_channel:cast(Chan, #'basic.reject'{delivery_tag = DTag, requeue = false}),
+  
+    wait_for_messages(Config, [[DLQHighPriority, <<"1">>, <<"1">>, <<"0">>]]),
+    wait_for_messages(Config, [[DLQLogger, <<"1">>, <<"1">>, <<"0">>]]),
+    wait_for_messages(Config, [[DLQAllWithX, <<"1">>, <<"1">>, <<"0">>]]),
+    wait_for_messages(Config, [[DLQAnyWithX, <<"0">>, <<"0">>, <<"0">>]]),
+  
+    cleanup_resources(Chan, [DLXExchange], [QueueName, DLQHighPriority, DLQLogger, DLQAllWithX, DLQAnyWithX]),
+    passed.
 
 %% -------------------------------------------------------------------
 %% Specs.
