@@ -18,6 +18,7 @@ groups() ->
     {non_parallel_tests, [], [
       topic_routing_semantics_when_messages_missing_radlx_arguments,
       topic_routing_semantics_when_messages_with_radlx_arguments_but_should_not_die_yet,
+      topic_routing_semantics_when_invalid_max_per_cycle,
       testing_invalid_reason_defaults_to_rejected,
       testing_topology_two_retries_for_one_cycle_reject_reason,
       testing_topology_two_retries_for_two_cycles_reject_reason,
@@ -62,9 +63,9 @@ end_per_testcase(Testcase, Config) ->
 %% -------------------------------------------------------------------
 
 topic_routing_semantics_when_messages_missing_radlx_arguments(Config) ->
-%%  Testing topic routing when radlx headers are not defined in the message
-%%  This is not the intended use of this exchange, but I want to ensure
-%%  that it behaves like a regular topic exchange in that case.
+  %%  Testing topic routing when radlx headers are not defined in the message
+  %%  This is not the intended use of this exchange, but I want to ensure
+  %%  that it behaves like a regular topic exchange in that case.
   ok = test_topic_routing_semantics(Config, single_queue_single_publish()),
   ok = test_topic_routing_semantics(Config, multiple_queues_no_match()),
   ok = test_topic_routing_semantics(Config, multiple_queues_all_match()),
@@ -73,46 +74,78 @@ topic_routing_semantics_when_messages_missing_radlx_arguments(Config) ->
   passed.
 
 topic_routing_semantics_when_messages_with_radlx_arguments_but_should_not_die_yet(Config) ->
-%%    Testing topic routing when radlx headers defined in the message
-%%    but the message should not die yet, as the death condition is not met.
-%%    so the expectations here are the same of the previous test.
+  %%    Testing topic routing when radlx headers defined in the message
+  %%    but the message should not die yet, as the death condition is not met.
+  %%    so the expectations here are the same of the previous test.
   ok = test_topic_routing_semantics_given_radlx(Config, single_queue_single_publish()),
   ok = test_topic_routing_semantics_given_radlx(Config, multiple_queues_no_match()),
   ok = test_topic_routing_semantics_given_radlx(Config, multiple_queues_all_match()),
   ok = test_topic_routing_semantics_given_radlx(Config, single_queue_multiple_publishes()),
   passed.
 
-  testing_invalid_reason_defaults_to_rejected(Config) ->
-    {_, Chan} = rabbit_ct_client_helpers:open_connection_and_channel(Config, 0),
-    DLXExchange = <<"dlx">>,
-    QueueName = <<"queue">>,
-    FinalDeadLetterQueue = <<"failed_queue">>,
+topic_routing_semantics_when_invalid_max_per_cycle(Config) ->
+  {_, Chan} = rabbit_ct_client_helpers:open_connection_and_channel(Config, 0),
+  DLXExchange = <<"dlx">>,
+  QueueName = <<"queue">>,
+  FinalDeadLetterQueue = <<"failed_queue">>,
+
+  declare_exchange(Chan, DLXExchange, <<"radlx">>),
+  declare_queue_with_dlx(Chan, QueueName, DLXExchange),
+  declare_queue(Chan, FinalDeadLetterQueue),
+  bind_queue_with_routing_key(Chan, QueueName, DLXExchange, QueueName),
+  bind_queue_with_arguments(Chan, FinalDeadLetterQueue, DLXExchange, [
+    {<<"x-match">>, longstr, <<"all">>},
+    {<<"radlx.dead.source">>, longstr, QueueName}
+  ]),
+
+  Payload = <<"p">>,
+  publish_message_with_headers(Chan, QueueName, Payload, [
+    {<<"radlx-max-per-cycle">>, long, -1},
+    {<<"radlx-track-queue">>, longstr, QueueName}
+  ]),
+
+  wait_for_messages(Config, [[QueueName, <<"1">>, <<"1">>, <<"0">>]]),
+  [DTag] = consume(Chan, QueueName, [Payload]),
+  amqp_channel:cast(Chan, #'basic.reject'{delivery_tag = DTag, requeue = false}),
+
+  %% Should use topic routing due to invalid max-per-cycle
+  wait_for_messages(Config, [[QueueName, <<"1">>, <<"1">>, <<"0">>]]),
+  wait_for_messages(Config, [[FinalDeadLetterQueue, <<"0">>, <<"0">>, <<"0">>]]),
+
+  cleanup_resources(Chan, [DLXExchange], [QueueName, FinalDeadLetterQueue]),
+  passed.
+
+testing_invalid_reason_defaults_to_rejected(Config) ->
+  {_, Chan} = rabbit_ct_client_helpers:open_connection_and_channel(Config, 0),
+  DLXExchange = <<"dlx">>,
+  QueueName = <<"queue">>,
+  FinalDeadLetterQueue = <<"failed_queue">>,
+
+  declare_exchange(Chan, DLXExchange, <<"radlx">>),
+  declare_queue_with_dlx(Chan, QueueName, DLXExchange),
+  declare_queue(Chan, FinalDeadLetterQueue),
+  bind_queue_with_routing_key(Chan, QueueName, DLXExchange, QueueName),
+  bind_queue_with_arguments(Chan, FinalDeadLetterQueue, DLXExchange, [
+    {<<"x-match">>, longstr, <<"all">>},
+    {<<"radlx.dead.source">>, longstr, QueueName}
+  ]),
+
+  Payload = <<"p">>,
+  %% Invalid reason should default to "rejected"
+  publish_message_with_headers(Chan, QueueName, Payload, [
+    {<<"radlx-max-per-cycle">>, long, 1},
+    {<<"radlx-track-queue">>, longstr, QueueName},
+    {<<"radlx-track-reason">>, longstr, <<"invalid_reason">>}
+  ]),
+
+  wait_for_messages(Config, [[QueueName, <<"1">>, <<"1">>, <<"0">>]]),
+  [DTag] = consume(Chan, QueueName, [Payload]),
+  amqp_channel:cast(Chan, #'basic.reject'{delivery_tag = DTag, requeue = false}),
+
+  wait_for_messages(Config, [[FinalDeadLetterQueue, <<"1">>, <<"1">>, <<"0">>]]),
   
-    declare_exchange(Chan, DLXExchange, <<"radlx">>),
-    declare_queue_with_dlx(Chan, QueueName, DLXExchange),
-    declare_queue(Chan, FinalDeadLetterQueue),
-    bind_queue_with_routing_key(Chan, QueueName, DLXExchange, QueueName),
-    bind_queue_with_arguments(Chan, FinalDeadLetterQueue, DLXExchange, [
-      {<<"x-match">>, longstr, <<"all">>},
-      {<<"radlx.dead.source">>, longstr, QueueName}
-    ]),
-  
-    Payload = <<"p">>,
-    %% Invalid reason should default to "rejected"
-    publish_message_with_headers(Chan, QueueName, Payload, [
-      {<<"radlx-max-per-cycle">>, long, 1},
-      {<<"radlx-track-queue">>, longstr, QueueName},
-      {<<"radlx-track-reason">>, longstr, <<"invalid_reason">>}
-    ]),
-  
-    wait_for_messages(Config, [[QueueName, <<"1">>, <<"1">>, <<"0">>]]),
-    [DTag] = consume(Chan, QueueName, [Payload]),
-    amqp_channel:cast(Chan, #'basic.reject'{delivery_tag = DTag, requeue = false}),
-  
-    wait_for_messages(Config, [[FinalDeadLetterQueue, <<"1">>, <<"1">>, <<"0">>]]),
-    
-    cleanup_resources(Chan, [DLXExchange], [QueueName, FinalDeadLetterQueue]),
-    passed.
+  cleanup_resources(Chan, [DLXExchange], [QueueName, FinalDeadLetterQueue]),
+  passed.
 
 testing_topology_two_retries_for_one_cycle_reject_reason(Config) ->
   %% Testing a topology where the message should be processed by the queue two times,

@@ -100,7 +100,7 @@ build_death_decision_header(MaxPerRound, QueueToTrack, ReasonToTrack, Deaths) ->
   end.
 
 should_add_death_header(MaxPerRound, QueueToTrack, ReasonToTrack, Deaths) 
-  when is_integer(MaxPerRound), MaxPerRound =/= 0, QueueToTrack =/= undefined ->
+  when is_integer(MaxPerRound), MaxPerRound > 0, QueueToTrack =/= undefined ->
   check_death_count_reached_threshold(MaxPerRound, QueueToTrack, ReasonToTrack, Deaths);
 should_add_death_header(_, _, _, _) ->
   false.
