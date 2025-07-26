@@ -22,7 +22,7 @@
 -define(MaxPerCycleArgument, <<"radlx-max-per-cycle">>).
 -define(QueueToTrackArgument, <<"radlx-track-queue">>).
 -define(ReasonToTrackArgument, <<"radlx-track-reason">>).
--define(DeathArgumentKey, <<"radlx.dead.from">>).
+-define(DeathArgumentKey, <<"radlx.dead.source">>).
 %%----------------------------------------------------------------------------
 info(_X) -> [].
 info(_X, _) -> [].

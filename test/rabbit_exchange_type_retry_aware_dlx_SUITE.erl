@@ -17,7 +17,8 @@ groups() ->
   [
     {non_parallel_tests, [], [
       direct_routing_semantics_when_messages_missing_radlx_arguments,
-      direct_routing_semantics_when_messages_with_radlx_arguments_but_should_not_die_yet
+      direct_routing_semantics_when_messages_with_radlx_arguments_but_should_not_die_yet,
+      testing_topology_two_retries_for_one_cycle
     ]}
   ].
 
@@ -77,6 +78,48 @@ direct_routing_semantics_when_messages_with_radlx_arguments_but_should_not_die_y
   ok = test_direct_routing_semantics_given_radlx(Config, single_queue_multiple_publishes()),
   passed.
 
+testing_topology_two_retries_for_one_cycle(Config) ->
+  %% Testing a topology with a Radlx exchange, a queue with a dead letter exchange,
+  %% The message should be processed by the queue two times, and then moves to the final dead letter queue.
+  {_Conn, Ch} = rabbit_ct_client_helpers:open_connection_and_channel(Config, 0),
+  DLXExchange = <<"dlx">>,
+  QueueName = <<"queue">>,
+  FinalDeadLetterQueue = <<"failed_queue">>,
+
+  declare_radlx_exchange(Ch, DLXExchange),
+  declare_queue_with_dlx(Ch, QueueName, DLXExchange),
+  declare_queue(Ch, FinalDeadLetterQueue),
+  bind_queue_with_routing_key(Ch, QueueName, DLXExchange, QueueName),
+  bind_queue_with_arguments(Ch, FinalDeadLetterQueue, DLXExchange, [
+    {<<"x-match">>, longstr, <<"all">>},
+    {<<"radlx.dead.source">>, longstr, QueueName}
+  ]),
+
+  Payload = <<"p">>,
+  publish_message_with_headers(Ch, QueueName, Payload, [
+    {<<"radlx-max-per-cycle">>, long, 2},
+    {<<"radlx-track-queue">>, longstr, QueueName}
+  ]),
+
+  %%  First cycle: first reject, should go to Radlx exchange, and it decided should not die yet.
+  wait_for_messages(Config, [[QueueName, <<"1">>, <<"1">>, <<"0">>]]),
+  [DTag] = consume(Ch, QueueName, [Payload]),
+  amqp_channel:cast(Ch, #'basic.reject'{delivery_tag = DTag, requeue = false}),
+
+  %%  First cycle: second reject, should go to Radlx exchange, and given it died MaxPerCycle times,
+  %%  it should be send to the final dead letter queue.
+  wait_for_messages(Config, [[QueueName, <<"1">>, <<"1">>, <<"0">>]]),
+  [DTag2] = consume(Ch, QueueName, [Payload]),
+  amqp_channel:cast(Ch, #'basic.reject'{delivery_tag = DTag2, requeue = false}),
+
+  %%  Final dead letter queue should have the message now.
+  wait_for_messages(Config, [[FinalDeadLetterQueue, <<"1">>, <<"1">>, <<"0">>]]),
+  passed.
+
+
+%% -------------------------------------------------------------------
+%% Specs.
+%% -------------------------------------------------------------------
 single_queue_single_publish() ->
   {[<<"a0.b0.c0.d0">>, <<"a1.b1.c1.d1">>],
     [<<"a0.b0.c0.d0">>],
@@ -97,40 +140,31 @@ single_queue_multiple_publishes() ->
     [<<"a0.b0.c0.d0">>, <<"a0.b0.c0.d1">>],
     1}.
 
-test_direct_routing_semantics(Config, {Queues, PublishKeys, ExpectedCount}) ->
+%% -------------------------------------------------------------------
+%% Helpers.
+%% -------------------------------------------------------------------
+
+test_direct_routing_semantics(Config, TestSpec) ->
+  test_routing_with_headers(Config, TestSpec, []).
+
+test_direct_routing_semantics_given_radlx(Config, TestSpec) ->
+  test_routing_with_headers(Config, TestSpec, [
+    {<<"radlx-max-per-cycle">>, long, 1000},
+    {<<"radlx-track-queue">>, longstr, <<"queue">>}
+  ]).
+
+test_routing_with_headers(Config, {Queues, PublishKeys, ExpectedCount}, Headers) ->
   Chan = rabbit_ct_client_helpers:open_channel(Config, 0),
   ExchangeName = <<"testing">>,
 
-  setup_exchange(Chan, ExchangeName),
-  setup_queues_and_bindings(Chan, ExchangeName, Queues),
-  publish_messages(Chan, ExchangeName, PublishKeys, []),
-
-  ActualCount = count_total_messages(Chan, Queues),
-  ExpectedCount = ActualCount,
-
+  declare_exchange(Chan, ExchangeName),
+  declare_queues_and_bindings(Chan, ExchangeName, Queues),
+  publish_messages(Chan, ExchangeName, PublishKeys, Headers),
+  verify_message_count(Chan, Queues, ExpectedCount),
   cleanup_resources(Chan, ExchangeName, Queues),
-  rabbit_ct_client_helpers:close_channel(Chan),
   ok.
 
-test_direct_routing_semantics_given_radlx(Config, {Queues, PublishKeys, ExpectedCount}) ->
-  Chan = rabbit_ct_client_helpers:open_channel(Config, 0),
-  ExchangeName = <<"testing">>,
-
-  setup_exchange(Chan, ExchangeName),
-  setup_queues_and_bindings(Chan, ExchangeName, Queues),
-  publish_messages(Chan, ExchangeName, PublishKeys, [
-    {<<"radlx-max-per-cycle">>, 1000},
-    {<<"radlx-track-queue">>, <<"queue">>}
-  ]),
-
-  ActualCount = count_total_messages(Chan, Queues),
-  ExpectedCount = ActualCount,
-
-  cleanup_resources(Chan, ExchangeName, Queues),
-  rabbit_ct_client_helpers:close_channel(Chan),
-  ok.
-
-setup_exchange(Chan, ExchangeName) ->
+declare_exchange(Chan, ExchangeName) ->
   #'exchange.declare_ok'{} =
     amqp_channel:call(Chan,
       #'exchange.declare'{
@@ -139,7 +173,7 @@ setup_exchange(Chan, ExchangeName) ->
         auto_delete = true
       }).
 
-setup_queues_and_bindings(Chan, ExchangeName, Queues) ->
+declare_queues_and_bindings(Chan, ExchangeName, Queues) ->
   [declare_and_bind_queue(Chan, ExchangeName, Q) || Q <- Queues].
 
 declare_and_bind_queue(Chan, ExchangeName, QueueName) ->
@@ -151,8 +185,8 @@ declare_and_bind_queue(Chan, ExchangeName, QueueName) ->
       exchange = ExchangeName,
       routing_key = QueueName}).
 
-publish_messages(Chan, ExchangeName, PublishKeys, Arguments) ->
-  Msg = #amqp_msg{props = #'P_basic'{}, payload = <<>>},
+publish_messages(Chan, ExchangeName, PublishKeys, Headers) ->
+  Msg = #amqp_msg{props = #'P_basic'{headers = Headers}, payload = <<>>},
   #'tx.select_ok'{} = amqp_channel:call(Chan, #'tx.select'{}),
   [publish_single_message(Chan, ExchangeName, RK, Msg) || RK <- PublishKeys],
   amqp_channel:call(Chan, #'tx.commit'{}).
@@ -161,6 +195,10 @@ publish_single_message(Chan, ExchangeName, RoutingKey, Msg) ->
   amqp_channel:call(Chan, #'basic.publish'{
     exchange = ExchangeName, routing_key = RoutingKey},
     Msg).
+
+verify_message_count(Chan, Queues, ExpectedCount) ->
+  ActualCount = count_total_messages(Chan, Queues),
+  ExpectedCount = ActualCount.
 
 count_total_messages(Chan, Queues) ->
   Counts = [get_queue_message_count(Chan, Q) || Q <- Queues],
@@ -174,4 +212,50 @@ get_queue_message_count(Chan, QueueName) ->
 
 cleanup_resources(Chan, ExchangeName, Queues) ->
   amqp_channel:call(Chan, #'exchange.delete'{exchange = ExchangeName}),
-  [amqp_channel:call(Chan, #'queue.delete'{queue = Q}) || Q <- Queues].
+  [amqp_channel:call(Chan, #'queue.delete'{queue = Q}) || Q <- Queues],
+  rabbit_ct_client_helpers:close_channel(Chan).
+
+
+declare_radlx_exchange(Ch, ExchangeName) ->
+  #'exchange.declare_ok'{} = amqp_channel:call(Ch, #'exchange.declare'{
+    exchange = ExchangeName,
+    type = <<"radlx">>
+  }).
+
+declare_queue_with_dlx(Ch, QueueName, DLXExchange) ->
+  #'queue.declare_ok'{} = amqp_channel:call(Ch, #'queue.declare'{
+    queue = QueueName,
+    arguments = [{<<"x-dead-letter-exchange">>, longstr, DLXExchange}],
+    durable = true
+  }).
+
+declare_queue(Ch, QueueName) ->
+  #'queue.declare_ok'{} = amqp_channel:call(Ch, #'queue.declare'{
+    queue = QueueName
+  }).
+
+bind_queue_with_routing_key(Ch, QueueName, ExchangeName, RoutingKey) ->
+  #'queue.bind_ok'{} = amqp_channel:call(Ch, #'queue.bind'{
+    queue = QueueName,
+    exchange = ExchangeName,
+    routing_key = RoutingKey
+  }).
+
+bind_queue_with_arguments(Ch, QueueName, ExchangeName, Arguments) ->
+  #'queue.bind_ok'{} = amqp_channel:call(Ch, #'queue.bind'{
+    queue = QueueName,
+    exchange = ExchangeName,
+    arguments = Arguments
+  }).
+
+publish_message_with_headers(Ch, RoutingKey, Payload, Headers) ->
+  amqp_channel:call(Ch, #'basic.publish'{routing_key = RoutingKey},
+    #amqp_msg{props = #'P_basic'{headers = Headers}, payload = Payload}).
+
+
+consume(Ch, QName, Payloads) ->
+  [begin
+     {#'basic.get_ok'{delivery_tag = DTag}, #amqp_msg{payload = Payload}} =
+       amqp_channel:call(Ch, #'basic.get'{queue = QName}),
+     DTag
+   end || Payload <- Payloads].
