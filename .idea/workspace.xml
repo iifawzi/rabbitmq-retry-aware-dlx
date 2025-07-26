@@ -5,7 +5,8 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="a4278bac-8371-4b1b-9f16-529c1f031836" name="Changes" comment="">
-      <change beforePath="$PROJECT_DIR$/Makefile" beforeDir="false" afterPath="$PROJECT_DIR$/Makefile" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/rabbit_exchange_type_retry_aware_dlx.erl" beforeDir="false" afterPath="$PROJECT_DIR$/src/rabbit_exchange_type_retry_aware_dlx.erl" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -70,7 +71,7 @@
       <updated>1753489030489</updated>
       <workItem from="1753489032237" duration="986000" />
       <workItem from="1753490453533" duration="868000" />
-      <workItem from="1753491486152" duration="44000" />
+      <workItem from="1753491486152" duration="6354000" />
     </task>
     <servers />
   </component>
