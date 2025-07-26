@@ -1,5 +1,5 @@
-PROJECT = rabbitmq_atomic_death_exchange
-PROJECT_DESCRIPTION = RabbitMQ Atomic Death Exchange
+PROJECT = rabbitmq_retry_aware_dlx
+PROJECT_DESCRIPTION = RabbitMQ exchange that enables atomic, per-message death decisions with retries
 
 RABBITMQ_VERSION = v4.1.x
 current_rmq_ref = $(RABBITMQ_VERSION)
