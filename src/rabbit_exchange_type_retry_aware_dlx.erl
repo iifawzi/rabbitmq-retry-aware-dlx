@@ -116,12 +116,6 @@ check_death_count_reached_threshold(MaxPerRound, QueueName, Reason, {deaths, _Fi
 check_death_count_reached_threshold(_, _, _, _) ->
   false.
 
-find_death_record(Key, Deaths) ->
-  case lists:keyfind(Key, 1, Deaths) of
-    {_, DeathRecord} -> DeathRecord;
-    false -> not_found
-  end.
-
 is_threshold_reached(Count, MaxPerRound) ->
   Count rem MaxPerRound =:= 0.
 
