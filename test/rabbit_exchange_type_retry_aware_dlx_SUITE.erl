@@ -21,6 +21,9 @@ groups() ->
       topic_routing_semantics_when_messages_with_radlx_arguments_but_should_not_die_yet,
       topic_routing_semantics_when_invalid_max_per_cycle,
       testing_invalid_reason_defaults_to_rejected,
+      testing_remove_bindings,
+      testing_remove_bindings_during_queue_deletion,
+      testing_remove_bindings_during_exchange_deletion,
       testing_topology_two_retries_for_one_cycle_reject_reason,
       testing_topology_two_retries_for_two_cycles_reject_reason,
       testing_topology_expired_reason,
@@ -146,6 +149,89 @@ testing_invalid_reason_defaults_to_rejected(Config) ->
   wait_for_messages(Config, [[FinalDeadLetterQueue, <<"1">>, <<"1">>, <<"0">>]]),
   
   cleanup_resources(Chan, [DLXExchange], [QueueName, FinalDeadLetterQueue]),
+  passed.
+
+testing_remove_bindings(Config) ->
+  %% Given the changes in remove bindings to avoid removing bindings with headers in topic db (given they weren't even registered)
+  %% these tests ensure deletion still works without errors.
+  {_, Chan} = rabbit_ct_client_helpers:open_connection_and_channel(Config, 0),
+  Exchange = <<"exchange">>,
+  FailedQueue = <<"failed_queue">>,
+  Queue = <<"queue">>,
+
+  declare_exchange(Chan, Exchange, <<"radlx">>),
+  declare_queue(Chan, FailedQueue),
+  declare_queue(Chan, Queue),
+  
+  bind_queue_with_arguments(Chan, FailedQueue, Exchange, [
+    {<<"radlx.dead.source">>, longstr, Queue},
+    {<<"x-match">>, longstr, <<"all">>}
+  ]),
+  bind_queue_with_routing_key(Chan, Queue, Exchange, <<"testing">>),
+
+  #'queue.unbind_ok'{} = amqp_channel:call(Chan, #'queue.unbind'{
+    queue = FailedQueue,
+    exchange = Exchange,
+    arguments = [
+      {<<"radlx.dead.source">>, longstr, <<"put_ad_in_elastic_search">>},
+      {<<"x-match">>, longstr, <<"all">>}
+    ],
+    routing_key = <<>>
+  }),
+
+  #'queue.unbind_ok'{} = amqp_channel:call(Chan, #'queue.unbind'{
+    queue = FailedQueue,
+    exchange = Exchange,
+    routing_key = Queue,
+    arguments = []
+  }),
+
+  cleanup_resources(Chan, [Exchange], [FailedQueue, Queue]),
+  passed.
+
+testing_remove_bindings_during_queue_deletion(Config) ->
+  %% Queue deletion also triggers binding removal
+  {_, Chan} = rabbit_ct_client_helpers:open_connection_and_channel(Config, 0),
+  Exchange = <<"exchange">>,
+  FailedQueue = <<"failed_queue">>,
+  Queue = <<"queue">>,
+
+  declare_exchange(Chan, Exchange, <<"radlx">>),
+  declare_queue(Chan, FailedQueue),
+  declare_queue(Chan, Queue),
+  
+  bind_queue_with_arguments(Chan, FailedQueue, Exchange, [
+    {<<"radlx.dead.source">>, longstr, Queue},
+    {<<"x-match">>, longstr, <<"all">>}
+  ]),
+  bind_queue_with_routing_key(Chan, Queue, Exchange, <<"testing">>),
+  
+  amqp_channel:call(Chan, #'queue.delete'{queue = FailedQueue}),
+  amqp_channel:call(Chan, #'queue.delete'{queue = Queue}),
+
+
+  cleanup_resources(Chan, [Exchange], []),
+  passed.
+
+testing_remove_bindings_during_exchange_deletion(Config) ->
+  {_, Chan} = rabbit_ct_client_helpers:open_connection_and_channel(Config, 0),
+  Exchange = <<"exchange">>,
+  FailedQueue = <<"failed_queue">>,
+  Queue = <<"queue">>,
+
+  declare_exchange(Chan, Exchange, <<"radlx">>),
+  declare_queue(Chan, FailedQueue),
+  declare_queue(Chan, Queue),
+  
+  bind_queue_with_arguments(Chan, FailedQueue, Exchange, [
+    {<<"radlx.dead.source">>, longstr, Queue},
+    {<<"x-match">>, longstr, <<"all">>}
+  ]),
+  bind_queue_with_routing_key(Chan, Queue, Exchange, <<"testing">>),
+  
+  amqp_channel:call(Chan, #'exchange.delete'{exchange = Exchange}),
+
+  cleanup_resources(Chan, [], [FailedQueue, Queue]),
   passed.
 
 testing_topology_two_retries_for_one_cycle_reject_reason(Config) ->
@@ -529,7 +615,7 @@ consume(Chan, QName, Payloads) ->
 
 
 %%-------------------------------------------------------
-%% Utils copied from rabbit/queue_utils 
+%% Utils copied from the folks @ rabbit/queue_utils 
 wait_for_messages(Config, Stats) ->
   wait_for_messages(Config, lists:sort(Stats), ?WFM_DEFAULT_NUMS).
 

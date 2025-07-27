@@ -184,11 +184,10 @@ add_binding(_Serial, _Exchange, Binding = #binding{key = RoutingKey}) ->
     _    -> rabbit_db_topic_exchange:set(Binding)
   end.
 
-remove_bindings(_Serial, _X, Binding = #binding{key = RoutingKey}) ->
-  case RoutingKey of
-    <<>> -> ok;
-    _    -> rabbit_db_topic_exchange:delete(Binding)
-  end.
+remove_bindings(_Serial, _X, Bs) ->
+  NonHeadersBindings = [B || #binding{key = RoutingKey} = B <- Bs, RoutingKey =/= <<>>],
+  rabbit_db_topic_exchange:delete(NonHeadersBindings).
+
 assert_args_equivalence(X, Args) ->
   rabbit_exchange:assert_args_equivalence(X, Args).
 
