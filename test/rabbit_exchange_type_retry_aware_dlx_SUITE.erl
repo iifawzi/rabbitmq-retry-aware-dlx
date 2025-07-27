@@ -2,11 +2,12 @@
 -author("iifawzie@gmail.com").
 
 -compile(export_all).
--import(queue_utils, [wait_for_messages/2]).
 -include_lib("common_test/include/ct.hrl").
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("amqp_client/include/amqp_client.hrl").
 
+-define(WFM_SLEEP, 256).
+-define(WFM_DEFAULT_NUMS, 30_000 div ?WFM_SLEEP). %% ~30s
 
 all() ->
   [
@@ -525,3 +526,34 @@ consume(Chan, QName, Payloads) ->
        amqp_channel:call(Chan, #'basic.get'{queue = QName}),
      DTag
    end || Payload <- Payloads].
+
+
+%%-------------------------------------------------------
+%% Utils copied from rabbit/queue_utils 
+wait_for_messages(Config, Stats) ->
+  wait_for_messages(Config, lists:sort(Stats), ?WFM_DEFAULT_NUMS).
+
+wait_for_messages(Config, Stats, 0) ->
+  ?assertEqual(Stats,
+               lists:sort(
+                 filter_queues(Stats,
+                               rabbit_ct_broker_helpers:rabbitmqctl_list(
+                                 Config, 0, ["list_queues", "name", "messages", "messages_ready",
+                                             "messages_unacknowledged"]))));
+wait_for_messages(Config, Stats, N) ->
+  case lists:sort(
+         filter_queues(Stats,
+                       rabbit_ct_broker_helpers:rabbitmqctl_list(
+                         Config, 0, ["list_queues", "name", "messages", "messages_ready",
+                                     "messages_unacknowledged"]))) of
+      Stats0 when Stats0 == Stats ->
+          ok;
+      _ ->
+          timer:sleep(?WFM_SLEEP),
+          wait_for_messages(Config, Stats, N - 1)
+  end.
+filter_queues(Expected, Got) ->
+  Keys = [hd(E) || E <- Expected],
+  lists:filter(fun(G) ->
+                       lists:member(hd(G), Keys)
+               end, Got).
