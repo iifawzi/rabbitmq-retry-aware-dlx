@@ -1,11 +1,11 @@
 PROJECT = rabbitmq_retry_aware_dlx
 PROJECT_DESCRIPTION = RabbitMQ exchange that enables atomic, per-message death decisions with retries
 
-RABBITMQ_VERSION = v4.1.x
+RABBITMQ_VERSION = v4.1.2
 current_rmq_ref = $(RABBITMQ_VERSION)
 
 define PROJECT_APP_EXTRA_KEYS
-	{broker_version_requirements, ["4.1.0"]}
+	{broker_version_requirements, ["4.0.0", "4.1.2"]}
 endef
 
 dep_amqp_client                = git_rmq-subfolder rabbitmq-erlang-client $(RABBITMQ_VERSION)
