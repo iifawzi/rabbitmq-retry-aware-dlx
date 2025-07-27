@@ -5,7 +5,7 @@ RABBITMQ_VERSION = v3.13.7
 current_rmq_ref = $(RABBITMQ_VERSION)
 
 define PROJECT_APP_EXTRA_KEYS
-	{broker_version_requirements, ["3.13.0", "3.13.7"]}
+	{broker_version_requirements, ["3.13.3", "3.13.7"]}
 endef
 
 dep_amqp_client                = git_rmq-subfolder rabbitmq-erlang-client $(RABBITMQ_VERSION)
