@@ -105,11 +105,13 @@ should_add_death_header(MaxPerRound, QueueToTrack, ReasonToTrack, Deaths)
 should_add_death_header(_, _, _, _) ->
   false.
 
-check_death_count_reached_threshold(MaxPerRound, QueueName, Reason, Deaths) when is_list(Deaths) ->
+check_death_count_reached_threshold(MaxPerRound, QueueName, Reason, {deaths, _First, _Last, Records}) ->
   DeathKey = {QueueName, Reason},
-  case find_death_record(DeathKey, Deaths) of
-    {death, _, _, Count, _} -> is_threshold_reached(Count, MaxPerRound);
-    not_found -> false
+  case maps:get(DeathKey, Records, not_found) of
+    {death, _, _, Count, _} ->
+      is_threshold_reached(Count, MaxPerRound);
+    not_found ->
+      false
   end;
 check_death_count_reached_threshold(_, _, _, _) ->
   false.
