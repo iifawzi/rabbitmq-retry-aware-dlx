@@ -19,7 +19,7 @@ The `rabbitmq_retry_aware_dlx` plugin introduces a new exchange type (`radlx`) t
 - **Cycle-aware retries** - Maintains consistent retry counts even when messages cycle back through TTL or shovel
 - **Reason tracking** - Track different death reasons (rejected, expired, maxlen, delivery_limit)
 - **Advanced routing** - Uses headers exchange for dead messages, enabling sophisticated DLQ topologies
-- **Fallback to topic routing** - Messages without retry configuration use standard topic exchange semantics
+- **Default to topic routing** - Messages those shouldn't be dead lettered yet, are routed using standard topic exchange semantics
 
 ## Installation
 
