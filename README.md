@@ -43,21 +43,23 @@ For other versions, please [create an issue](https://github.com/your-repo/issues
 
 ## Usage
 
-### Basic Setup
+### Basic usage:
 
 1. Declare an exchange with type `radlx`:
 ```bash
 rabbitmqadmin declare exchange name=my-dlx type=radlx
 ```
 
-2. Configure message headers:
+2. Publish the message with the following headers:
 - `radlx-max-per-cycle` (integer) - Maximum retries per cycle
 - `radlx-track-queue` (string) - Queue name to track deaths for
-- `radlx-track-reason` (string) - Death reason to track: "rejected", "expired", "maxlen", or "delivery_limit"
+- `radlx-track-reason` (Optional String) - Death reason to track: "rejected", "expired", "maxlen", or "delivery_limit" (default: rejected)
+
+if `radlx-max-per-cycle` or  `radlx-track-queue` headers aren't defined in the messages, the exchange will follow the typical topic routing semantics, based on routing keys. 
 
 3. Bind queues:
-- Regular bindings use topic exchange semantics
-- Header bindings with `radlx.dead.source` match dead-lettered messages
+- Regular bindings use topic exchange semantics to be usef when the messages shouldn't be dead lettered. 
+- Header bindings with `radlx.dead.source` headers, where the value should be the queue name that its messages should be dead lettered when the conditions are met.  
 
 ### Message Flow
 
@@ -75,9 +77,11 @@ rabbitmqadmin declare exchange name=my-dlx type=radlx
                     │                                                   │
                     ▼ Yes                                               ▼ No
         ┌────────────────────┐                              ┌───────────────────┐
-        │  Headers routing   │                              │  Topic routing    │
-        │+ radlx.dead.source │                              │ (any queue by     │
-        └─────────┬──────────┘                              │  routing key)     │
+        │ radlx.dead.source  │                              │  Topic routing    |
+        | is added and       |                              |  semantics        │
+        │ headers routing    |                              |                   |
+        | smeantics applies  |                              │                   |
+        └─────────┬──────────┘                              │                   |
                   │                                         └───────────────────┘
                   ▼
           ┌──────────────┐
@@ -89,8 +93,7 @@ rabbitmqadmin declare exchange name=my-dlx type=radlx
 ## Examples
 
 ### 1. Simple Retry with DLQ
-
-**Setup**: Messages get 2 retries before going to DLQ. When rejected, messages go to the RADLX exchange which routes back to the same queue until the retry limit is reached.
+The goal of this topology is to showcase a simple setup that provides 2 retries per orders messages
 
 ```bash
 # Create RADLX exchange
@@ -110,6 +113,17 @@ rabbitmqadmin declare binding source=dlx destination=orders.failed \
   arguments='{"x-match":"all","radlx.dead.source":"orders"}'
 
 ```
+Publish a message with two headers: 
+1. `radlx-max-per-cycle` with value `2`.
+2. `radlx-track-queue` with value `orders`
+
+For the first time, when the message is rejected, it will go to RADLX Exchange
+and given the condition isn't met yet (1 < 2), RADLX will follow topic semantics
+so the message will be publised again to the same queue. 
+
+For the second time, when the message is rejected and rach RADLX
+the condition is met (2 == 2), in that case RADLX will add `radlx.dead.source` with value `orders` header to the message 
+and follow headers exchange symantics, and given we have a queue bound to the same header, the msg will end up in the DLQ (`orders.failed`). 
 
 **Flow Diagram**:
 ```
@@ -157,17 +171,24 @@ rabbitmqadmin declare binding source=dlx destination=orders.failed \
   arguments='{"x-match":"all","radlx.dead.source":"orders"}'
 
 ```
+Publish a message with two headers: 
+1. `radlx-max-per-cycle` with value `2`.
+2. `radlx-track-queue` with value `orders`
+
+In this example, we have a binding of the queue `orders.delay` with routing key `#` so 
+each time a message gets to RADLX and shouldn't be dead lettered yet, it will be routed to `orders.delay` following the typical 
+topic routing semantics, allowing for automatic retries topology. 
 
 **Flow Diagram**:
 ```
-First Cycle:
+First rejection:
 ┌────────┐ reject  ┌────────┐ topic (#)  ┌──────────────┐ TTL expires ┌────────┐
 │ Orders ├────────►│ RADLX  ├───────────►│Orders.Delay  ├────────────►│ Router │
 └────────┘         └────────┘            └──────────────┘   (5 sec)   └───┬────┘
     ▲                                                                     │
     └─────────────────────────────────────────────────────────────────────┘
 
-Second Cycle (after 2 rejections):
+Second rejection:
 ┌────────┐ reject  ┌────────┐ headers     ┌──────────────┐
 │ Orders ├────────►│ RADLX  ├────────────►│Orders.Failed │
 └────────┘         └────────┘             └──────────────┘
@@ -175,6 +196,10 @@ Second Cycle (after 2 rejections):
 ```
 
 ### 3. Multiple Cycles with TTL DLQ
+
+The goal of this topology is to showcase how `RADLX` is able of maintaining the same number of retries, each time the message 
+go back to the source queue after being dead lettered already (Imagine having a shovel movign messages from DLQ back to the source queue
+for another cycle of attempts, or a DLQ with TTL). In this setup, we're using a DLQ with TTL so messages go for another cycles of attempts. 
 
 **Setup**: DLQ itself has TTL, creating continuous retry cycles. Messages get 2 retries per cycle.
 
@@ -195,6 +220,11 @@ rabbitmqadmin declare binding source=dlx destination=orders.failed \
   arguments='{"x-match":"all","radlx.dead.source":"orders"}'
 
 ```
+Publish a message with two headers: 
+1. `radlx-max-per-cycle` with value `2`.
+2. `radlx-track-queue` with value `orders`
+
+Cycles are maintained automatically, no need for additional headers. 
 
 **Flow Diagram**:
 ```
@@ -217,6 +247,10 @@ Cycle 2:                                                                        
 
 
 ### 5. Priority-Based DLQ Routing
+
+The goal of this topology is to showcase the headers semantics when the message should be dead lettered
+to have a more sophisticated topology that combines the header added by `RADLX` `radlx.dead.source` and also other 
+business related headers, so messages are dead lettered to different queues. (Thanks to the typical headers exchange semantics)
 
 **Setup**: High-priority messages go to urgent DLQ, all messages go to logger, low-priority to standard DLQ.
 
@@ -246,6 +280,10 @@ rabbitmqadmin declare binding source=dlx destination=dlq.standard \
   arguments='{"x-match":"all","radlx.dead.source":"orders","priority":"standard"}'
 
 ```
+Publish a message with three headers: 
+1. `radlx-max-per-cycle` with value `1`.
+2. `radlx-track-queue` with value `orders`
+3. `priority` with value (`high` or `standard`)
 
 **Flow Diagram**:
 ```
@@ -271,19 +309,18 @@ With standard RabbitMQ exchanges, implementing retry logic with dead-lettering r
 1. **Application-level death count checking** - Your code must examine the death history
 2. **Manual routing decisions** - Explicitly publish to DLQ and acknowledge from source queue
 3. **Non-atomic operations** - Risk of duplicates or message loss between publish and ack
-4. **Complex error handling** - Must handle failures between DLQ publish and source ack
 
-The RADLX exchange solves the **dual-write problem** by making death decisions atomic within the exchange itself. No application code needed, no risk of duplicates.
+The RADLX exchange solves the **dual-write problem** by making death decisions atomic within the exchange itself. No application code needed, no risk of duplicates or messages lost. 
 
 ## Behind the scenes: How it works?
 
-1. **Death Tracking**: The plugin examines the message's death history to count occurrences for the specified queue/reason combination
+1. **Death Tracking**: The plugin examines the message's death history which's maintained already by the server, to count occurrences for the specified queue/reason combination.
 
-2. **Threshold Check**: Uses modulo arithmetic (`count % max-per-cycle == 0`) to ensure consistent retry counts across cycles
+2. **Threshold Check**: Uses modulo arithmetic (`count % max-per-cycle == 0`) to ensure consistent retry counts across cycles.
 
 3. **Routing Decision**:
-   - Below threshold: Routes using topic semantics (depending on routing keys)
-   - At threshold: Adds `radlx.dead.source` header and routes using headers exchange semantics (depending on messages headers plus the added `radlx.dead.source`)
+   - Below threshold: Routes using topic semantics (depending on routing keys).
+   - At threshold: Adds `radlx.dead.source` header and routes using headers exchange semantics (depending on messages headers plus the added `radlx.dead.source`).
 
 4. **Headers Matching**: Supports all standard headers exchange match modes:
    - `all` - All headers must match
