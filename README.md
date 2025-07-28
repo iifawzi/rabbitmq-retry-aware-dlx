@@ -109,8 +109,6 @@ rabbitmqadmin declare binding source=dlx destination=orders routing_key=orders
 rabbitmqadmin declare binding source=dlx destination=orders.failed \
   arguments='{"x-match":"all","radlx.dead.source":"orders"}'
 
-# Publish message with retry configuration
-# Headers: radlx-max-per-cycle=2, radlx-track-queue=orders
 ```
 
 **Flow Diagram**:
