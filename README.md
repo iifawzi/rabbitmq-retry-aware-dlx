@@ -1,6 +1,6 @@
 # RabbitMQ Retry-Aware DLX Plugin
 
-A RabbitMQ exchange plugin that provides atomic, per-message dead-lettering with configurable retry limits.
+A RabbitMQ exchange that performs atomic, per-message death decisions with built-in retry handling, determining in-server when a message should be retried or permanently dead-lettered—without relying on external consumers or race-prone logic.
 
 ## TL;DR
 
